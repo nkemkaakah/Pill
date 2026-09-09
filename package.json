@@ -1,0 +1,63 @@
+{
+  "name": "pill",
+  "productName": "Pill",
+  "version": "0.1.0",
+  "description": "A tiny always-on-top AI pill that sees your screen, hears your calls, and stays out of screen shares.",
+  "main": "main.js",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --mac --arm64 --dir",
+    "dist": "electron-builder --mac --arm64",
+    "smoke": "electron scripts/smoke.js",
+    "test": "node scripts/test-lib.js && node scripts/test-pipeline.js"
+  },
+  "dependencies": {
+    "@highlightjs/cdn-assets": "^11.11.1",
+    "dompurify": "^3.2.6",
+    "marked": "^15.0.12"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "dev.nkemka.pill",
+    "productName": "Pill",
+    "files": [
+      "main.js",
+      "preload.js",
+      "lib/**",
+      "renderer/**",
+      "node_modules/marked/**",
+      "node_modules/dompurify/**",
+      "node_modules/@highlightjs/cdn-assets/highlight.min.js",
+      "node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.png",
+      "hardenedRuntime": false,
+      "identity": null,
+      "extendInfo": {
+        "LSUIElement": true,
+        "NSMicrophoneUsageDescription": "Pill listens to your mic so it can transcribe what you say.",
+        "NSScreenCaptureUsageDescription": "Pill takes screenshots and captures system audio so it can see and hear what you are working on."
+      }
+    },
+    "extraResources": [
+      {
+        "from": "sidecar",
+        "to": "sidecar",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  }
+}

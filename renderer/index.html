@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'none'" />
+  <title>Pill</title>
+  <link rel="stylesheet" href="../node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="mode-pill">
+  <div id="shell" class="shell">
+
+    <!-- Capsule: the whole UI in pill mode, the header in panel mode -->
+    <header id="capsule" class="capsule">
+      <canvas id="meter" class="meter" width="48" height="28" aria-hidden="true"></canvas>
+      <div id="status" class="status" title="Click to open">
+        <span id="status-main" class="status-main">Pill</span>
+        <span id="status-sub" class="status-sub"></span>
+      </div>
+      <div class="capsule-actions">
+        <button id="btn-rec" class="rec" title="Start recording (⌃⌥R)" aria-pressed="false">
+          <span class="dot"></span><span id="rec-label" class="rec-label">Rec</span>
+        </button>
+        <button id="btn-snap" class="icon-btn" title="Ask about my screen (⌃⌥A)">
+          <svg viewBox="0 0 20 20"><rect x="3" y="5" width="14" height="11" rx="2"/><circle cx="10" cy="10.5" r="3"/><path d="M7 5l1-2h4l1 2"/></svg>
+        </button>
+        <button id="btn-expand" class="icon-btn" title="Expand / collapse (⌃⌥↩)">
+          <svg class="ic-expand" viewBox="0 0 20 20"><path d="M4 12v4h4M16 8V4h-4M4 16l5-5M16 4l-5 5"/></svg>
+          <svg class="ic-collapse" viewBox="0 0 20 20"><path d="M9 11v4H5M11 9V5h4M9 11l-5 5M11 9l5-5"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Panel body -->
+    <main id="panel" class="panel">
+      <nav class="tabs" id="tabs">
+        <button data-tab="chat" class="on">Chat</button>
+        <button data-tab="transcript">Transcript <span id="tab-lines" class="badge"></span></button>
+        <button data-tab="notes">Notes</button>
+        <button data-tab="settings">Settings</button>
+      </nav>
+
+      <!-- Chat -->
+      <section id="view-chat" class="view active">
+        <div id="setup" class="setup">
+          <div class="setup-row" data-item="key"><span class="mark"></span><span class="label">API key</span><button class="text-btn" data-tab="settings">Add in settings</button></div>
+          <div class="setup-row" data-item="screen"><span class="mark"></span><span class="label">Screen recording permission</span><button class="text-btn" id="setup-grant">Grant</button></div>
+          <div class="setup-row" data-item="mic"><span class="mark"></span><span class="label">Microphone permission</span><button class="text-btn" id="setup-grant-mic">Grant</button></div>
+          <p class="setup-note" id="setup-note"></p>
+        </div>
+
+        <div id="messages" class="messages">
+          <div class="empty" id="empty">
+            <p class="empty-title">Ask anything about what's on your screen or in your call.</p>
+            <p>Enter sends. Shift+Enter is a new line. A screenshot rides along with every question while the toggle below is on.</p>
+            <p>Press <b>Rec</b> to keep a transcript of your mic and whatever your Mac is playing. Then the actions below can answer for you, and Notes can write the meeting up afterwards.</p>
+          </div>
+        </div>
+
+        <div class="quick" id="quick">
+          <button data-action="answer" data-needs="transcript" title="Uses the transcript and a screenshot">
+            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>Answer what was asked
+          </button>
+          <button data-action="solve" title="Uses a screenshot">
+            <svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="10" rx="2"/><path d="M7 17h6"/></svg>Solve what's on screen
+          </button>
+          <button data-action="say" data-needs="transcript" title="Uses the transcript">
+            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>What should I say?
+          </button>
+          <button data-action="recap" data-needs="transcript" title="Uses the whole transcript">
+            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>Recap so far
+          </button>
+        </div>
+
+        <form id="composer" class="composer">
+          <div class="composer-row">
+            <textarea id="input" rows="1" placeholder="Ask… (⌃⌥A from anywhere)" spellcheck="false"></textarea>
+            <button id="btn-send" type="submit" class="send" title="Send">
+              <svg viewBox="0 0 20 20"><path d="M4 10h11M11 5l5 5-5 5"/></svg>
+            </button>
+            <button id="btn-stop" type="button" class="send stop" title="Stop">
+              <svg viewBox="0 0 20 20"><rect x="5" y="5" width="10" height="10" rx="2"/></svg>
+            </button>
+          </div>
+          <div class="composer-opts">
+            <label class="toggle"><input type="checkbox" id="opt-shot" /><span>Attach screenshot</span></label>
+            <label class="toggle"><input type="checkbox" id="opt-smart" /><span>Smart model</span></label>
+            <span class="context-hint" id="context-hint"></span>
+          </div>
+        </form>
+      </section>
+
+      <!-- Transcript -->
+      <section id="view-transcript" class="view">
+        <div class="session-bar">
+          <div class="session-meta">
+            <input id="session-title" class="session-title" placeholder="Untitled session" spellcheck="false" />
+            <span id="session-sub" class="session-sub">No session yet</span>
+          </div>
+          <div class="session-actions">
+            <button class="text-btn" id="btn-rerun" title="Re-run the local engine on this session's audio">Re-analyse</button>
+            <button class="text-btn" id="btn-copy-transcript">Copy</button>
+            <button class="text-btn" id="btn-new-session" title="Start a fresh transcript">New</button>
+          </div>
+        </div>
+        <div id="refine-banner" class="refine-banner"></div>
+        <div id="speaker-chips" class="speaker-chips"></div>
+        <div id="transcript" class="transcript">
+          <p class="hint" id="transcript-empty">Press <b>Rec</b> in the capsule. Your mic lands here as <b>me</b>, everything your Mac plays as <b>them</b>. Lines appear a few seconds behind live.</p>
+        </div>
+      </section>
+
+      <!-- Notes -->
+      <section id="view-notes" class="view">
+        <div class="notes-scroll">
+          <div class="session-card" id="notes-card">
+            <div class="session-card-head">
+              <div>
+                <div id="notes-title" class="notes-title">No session</div>
+                <div id="notes-sub" class="session-sub">Record a call, then generate notes.</div>
+              </div>
+              <div class="session-actions">
+                <button class="primary" id="btn-notes">Generate notes</button>
+                <button class="send stop small" id="btn-notes-stop" title="Stop"><svg viewBox="0 0 20 20"><rect x="5" y="5" width="10" height="10" rx="2"/></svg></button>
+              </div>
+            </div>
+            <div id="notes-body" class="body notes-body"></div>
+            <div class="msg-meta" id="notes-meta"></div>
+          </div>
+
+          <div class="past">
+            <div class="past-head">
+              <h3>Past sessions</h3>
+              <div class="past-tools">
+                <input id="session-search" class="session-search" placeholder="Search sessions…" spellcheck="false" />
+                <button class="text-btn" id="btn-open-folder">Open folder</button>
+              </div>
+            </div>
+            <ul id="session-list" class="session-list"></ul>
+            <p class="hint" id="sessions-empty">Every recording is saved here automatically: transcript as .jsonl, notes as .md.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section id="view-settings" class="view">
+        <form id="settings" class="settings">
+          <label>
+            <span>Answers come from</span>
+            <select name="provider">
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openai">OpenAI, or any OpenAI-compatible endpoint</option>
+            </select>
+          </label>
+
+          <div class="provider-block" data-provider="anthropic">
+            <label>
+              <span>Anthropic API key</span>
+              <input type="password" name="anthropicApiKey" placeholder="sk-ant-…" autocomplete="off" />
+              <small id="anthropic-key-state"></small>
+            </label>
+            <div class="two">
+              <label><span>Fast model</span><input type="text" name="anthropicFastModel" /></label>
+              <label><span>Smart model</span><input type="text" name="anthropicSmartModel" /></label>
+            </div>
+            <small class="block-note">Current IDs: claude-haiku-4-5 (cheapest), claude-sonnet-5, claude-opus-5, claude-fable-5-1. Notes use the smart model.</small>
+          </div>
+
+          <div class="provider-block" data-provider="openai">
+            <label>
+              <span>Base URL</span>
+              <input type="text" name="baseUrl" placeholder="https://api.openai.com/v1" />
+              <small>Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1</small>
+            </label>
+            <div class="two">
+              <label><span>Fast model</span><input type="text" name="fastModel" /></label>
+              <label><span>Smart model</span><input type="text" name="smartModel" /></label>
+            </div>
+          </div>
+
+          <label>
+            <span>OpenAI API key</span>
+            <input type="password" name="apiKey" placeholder="sk-…" autocomplete="off" />
+            <small id="key-state"></small>
+            <small>Used for OpenAI answers and always for transcription (Anthropic has no speech-to-text).</small>
+          </label>
+
+          <div class="two">
+            <label>
+              <span>Effort</span>
+              <select name="reasoningEffort">
+                <option value="none">lowest (fastest)</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+            <label><span>Max output tokens</span><input type="number" name="maxOutputTokens" min="256" step="256" /></label>
+          </div>
+
+          <h3>Recording</h3>
+          <label class="toggle"><input type="checkbox" name="sttEnabled" /><span>Transcribe audio while recording</span></label>
+          <label class="toggle"><input type="checkbox" name="autoRecord" /><span>Start recording when Pill launches</span></label>
+          <div class="two">
+            <label><span>Transcription model</span><input type="text" name="sttModel" /></label>
+            <label><span>Chunk (seconds)</span><input type="number" name="chunkSeconds" min="3" max="20" /></label>
+          </div>
+          <label>
+            <span>Transcription base URL</span>
+            <input type="text" name="sttBaseUrl" placeholder="https://api.openai.com/v1" />
+          </label>
+          <div class="two">
+            <label>
+              <span>Typed questions see</span>
+              <select name="transcriptScope">
+                <option value="recent">the last few minutes</option>
+                <option value="all">the whole session</option>
+              </select>
+            </label>
+            <label><span>Recent = minutes</span><input type="number" name="transcriptWindowMinutes" min="2" max="60" /></label>
+          </div>
+
+          <h3>Local engine (transcript + speakers)</h3>
+          <label class="toggle"><input type="checkbox" name="localRefine" /><span>After stopping, rebuild the transcript locally with speaker names</span></label>
+          <label>
+            <span>fluidaudiocli path</span>
+            <input type="text" name="sidecarPath" placeholder="auto-detect (sidecar/, ~/.pill, PATH)" />
+            <small id="sidecar-state">Not checked yet.</small>
+          </label>
+          <small class="block-note">One-time setup on this Mac: run <code>scripts/build-sidecar.sh</code> in the pill folder. It clones FluidAudio and builds the engine; models download on first use. Recording and speaker naming work with no API key at all — only chat answers and notes need one.</small>
+
+          <h3>Behaviour</h3>
+          <label class="toggle"><input type="checkbox" name="invisible" /><span>Hidden from screen share and recordings</span></label>
+          <label class="toggle"><input type="checkbox" name="attachScreenshot" /><span>Attach a screenshot to every question by default</span></label>
+          <label>
+            <span>Extra instructions</span>
+            <textarea name="systemPrompt" rows="3" placeholder="e.g. I'm a TypeScript dev, prefer concise answers, UK spelling."></textarea>
+          </label>
+
+          <div class="settings-actions">
+            <button type="submit" class="primary">Save</button>
+            <button type="button" class="text-btn" id="btn-perms">Grant mic + screen</button>
+            <span id="perm-state" class="perm-state"></span>
+          </div>
+
+          <details class="shortcuts" open>
+            <summary>Shortcuts — click one, then press the new keys (Esc cancels, Backspace disables)</summary>
+            <ul id="shortcut-list"></ul>
+            <button type="button" class="text-btn" id="btn-shortcuts-reset">Reset to defaults</button>
+          </details>
+
+          <div class="settings-foot">
+            <button type="button" class="text-btn danger" id="btn-quit">Quit Pill</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Footer -->
+      <footer class="foot">
+        <div class="sizes" id="sizes">
+          <button data-size="S" title="Small">S</button>
+          <button data-size="M" title="Medium">M</button>
+          <button data-size="L" title="Large">L</button>
+          <span class="foot-hint">or drag any edge</span>
+        </div>
+        <div class="foot-right">
+          <button class="icon-btn" id="btn-eye" title="Hidden from screen share (⌃⌥I)">
+            <svg class="ic-eye-off" viewBox="0 0 20 20"><path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.5"/><path d="M3 17L17 3"/></svg>
+            <svg class="ic-eye-on" viewBox="0 0 20 20"><path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.5"/></svg>
+          </button>
+          <button class="icon-btn" id="btn-clear" title="New chat (⌘K)">
+            <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+          </button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <script src="../node_modules/marked/marked.min.js"></script>
+  <script src="../node_modules/dompurify/dist/purify.js"></script>
+  <script src="../node_modules/@highlightjs/cdn-assets/highlight.min.js"></script>
+  <script src="audio.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
