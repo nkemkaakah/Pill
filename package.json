@@ -11,10 +11,11 @@
     "pack": "electron-builder --mac --arm64 --dir",
     "dist": "electron-builder --mac --arm64",
     "smoke": "electron scripts/smoke.js",
-    "test": "node scripts/test-lib.js && node scripts/test-pipeline.js"
+    "test": "node scripts/test-lib.js && node scripts/test-pipeline.js && node scripts/test-audio.js"
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.11.1",
+    "audiotee": "^0.0.7",
     "dompurify": "^3.2.6",
     "marked": "^15.0.12"
   },
@@ -47,7 +48,8 @@
       "extendInfo": {
         "LSUIElement": true,
         "NSMicrophoneUsageDescription": "Pill listens to your mic so it can transcribe what you say.",
-        "NSScreenCaptureUsageDescription": "Pill takes screenshots and captures system audio so it can see and hear what you are working on."
+        "NSScreenCaptureUsageDescription": "Pill takes screenshots and captures system audio so it can see and hear what you are working on.",
+        "NSAudioCaptureUsageDescription": "Pill captures system audio so it can transcribe the other side of your calls."
       }
     },
     "extraResources": [
@@ -57,6 +59,10 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "node_modules/audiotee/bin/audiotee",
+        "to": "audiotee/audiotee"
       }
     ]
   }

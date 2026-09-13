@@ -33,6 +33,13 @@
 
     <!-- Panel body -->
     <main id="panel" class="panel">
+      <!-- Capture health. Lives above the tabs so it survives tab switches and is
+           never overwritten by the next transcript line. -->
+      <div id="capture-bar" class="capture-bar" hidden>
+        <span class="cap-txt" id="capture-text"></span>
+        <button class="cap-x" id="capture-dismiss" title="Dismiss">&times;</button>
+      </div>
+
       <nav class="tabs" id="tabs">
         <button data-tab="chat" class="on">Chat</button>
         <button data-tab="transcript">Transcript <span id="tab-lines" class="badge"></span></button>
@@ -99,6 +106,7 @@
           </div>
           <div class="session-actions">
             <button class="text-btn" id="btn-rerun" title="Re-run the local engine on this session's audio">Re-analyse</button>
+            <button class="text-btn" id="btn-rerun-cloud" title="Re-transcribe with Deepgram — costs money, needs a key in Settings">Cloud re-analyse</button>
             <button class="text-btn" id="btn-copy-transcript">Copy</button>
             <button class="text-btn" id="btn-new-session" title="Start a fresh transcript">New</button>
           </div>
@@ -202,13 +210,17 @@
           <label class="toggle"><input type="checkbox" name="sttEnabled" /><span>Transcribe audio while recording</span></label>
           <label class="toggle"><input type="checkbox" name="autoRecord" /><span>Start recording when Pill launches</span></label>
           <div class="two">
-            <label><span>Transcription model</span><input type="text" name="sttModel" /></label>
-            <label><span>Chunk (seconds)</span><input type="number" name="chunkSeconds" min="3" max="20" /></label>
+            <label>
+              <span>Live latency</span>
+              <select name="streamChunkMs">
+                <option value="160">fastest (160ms window)</option>
+                <option value="320">balanced (320ms)</option>
+                <option value="1280">most accurate (1280ms)</option>
+              </select>
+            </label>
+            <label><span>Pause before a line is final (ms)</span><input type="number" name="eouDebounceMs" min="300" max="4000" step="100" /></label>
           </div>
-          <label>
-            <span>Transcription base URL</span>
-            <input type="text" name="sttBaseUrl" placeholder="https://api.openai.com/v1" />
-          </label>
+          <small class="block-note">Live transcription runs on this Mac — no API key, no per-minute cost, nothing sent anywhere. English only.</small>
           <div class="two">
             <label>
               <span>Typed questions see</span>
@@ -228,6 +240,30 @@
             <small id="sidecar-state">Not checked yet.</small>
           </label>
           <small class="block-note">One-time setup on this Mac: run <code>scripts/build-sidecar.sh</code> in the pill folder. It clones FluidAudio and builds the engine; models download on first use. Recording and speaker naming work with no API key at all — only chat answers and notes need one.</small>
+
+          <h3>Cloud transcript (optional)</h3>
+          <label>
+            <span>Deepgram API key</span>
+            <input type="password" name="deepgramApiKey" placeholder="paste to enable" autocomplete="off" />
+            <small id="deepgram-key-state"></small>
+          </label>
+          <label>
+            <span>Language</span>
+            <select name="cloudLanguage">
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="pt">Portuguese</option>
+              <option value="it">Italian</option>
+              <option value="nl">Dutch</option>
+              <option value="hi">Hindi</option>
+              <option value="ja">Japanese</option>
+              <option value="multi">Multilingual (auto)</option>
+            </select>
+            <small>Cloud pass only. Live and local transcription are English-only — those models ship English-only weights.</small>
+          </label>
+          <small class="block-note">Only used when you press <b>Cloud re-analyse</b> on the Transcript tab — never automatically. Adds punctuation and capitalisation the local models don't produce. Billed per second of audio per channel, roughly $0.52 for a one-hour two-person call. Speaker names still come from the local engine, which is the only one that produces voiceprints.</small>
 
           <h3>Behaviour</h3>
           <label class="toggle"><input type="checkbox" name="invisible" /><span>Hidden from screen share and recordings</span></label>

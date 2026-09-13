@@ -10,17 +10,19 @@ const prompts = require('./lib/prompts');
 const sessions = require('./lib/sessions');
 const speakers = require('./lib/speakers');
 const sidecarLib = require('./lib/sidecar');
+const deepgram = require('./lib/deepgram');
 const { refine } = require('./lib/refine');
 const { WavWriter } = require('./lib/wav');
+const { SystemAudio } = require('./lib/systemaudio');
 
 const isMac = process.platform === 'darwin';
 
-// macOS system-audio loopback (what the other side of a call is saying) is exposed to
-// the renderer through getDisplayMedia. Electron 31-38 needs these Chromium features
-// switched on or the request rejects with "Error starting capture". Must run before ready.
-if (isMac) {
-  app.commandLine.appendSwitch('enable-features', 'MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride');
-}
+// The "them" channel used to come from getDisplayMedia({audio:'loopback'}), which
+// Electron supports on Windows only — on macOS the audio track never existed and the
+// error was swallowed, so them.wav was a 44-byte header for every meeting ever
+// recorded. Two Chromium feature switches here were meant to enable it; neither name
+// exists in the shipped binary. System audio now comes from a Core Audio process tap
+// (lib/systemaudio.js) instead.
 
 // ---------- geometry ----------
 const PILL = { width: 300, height: 46 };
@@ -44,6 +46,7 @@ let currentRequest = null;     // { id, controller }
 let notesRequest = null;
 let wavWriters = { me: null, them: null };   // raw-audio capture for the local engine
 let refining = null;                          // { sessionId, stage } while the local engine runs
+let systemAudio = null;                       // Core Audio process tap feeding the "them" channel
 const shortcutState = {};
 
 // =====================================================================
@@ -332,28 +335,64 @@ async function ask({ question, action, withScreenshot, smart }) {
 // =====================================================================
 // Speech to text
 // =====================================================================
-const HALLUCINATIONS = new Set(['you', 'thank you.', 'thanks.', 'bye.', '.', 'thank you', 'thanks for watching.', 'okay.', 'ok.']);
+// Live transcription runs locally: one long-lived `parakeet-stream` process per
+// channel, fed the same 16 kHz PCM that goes to the WAV files. It replaces the old
+// path, which cut audio into fixed 6-second blocks and posted each one to OpenAI —
+// that made 6s the floor latency by construction, sliced words at every boundary, and
+// cost money per meeting. There is no hallucination blocklist any more: it existed to
+// paper over near-silent chunks, and it silently ate real short replies like "ok".
+let liveStt = { me: null, them: null };
+const _pcmDebug = {}; // PILL_DEBUG_PCM only
 
-async function handleAudioChunk({ who, buffer, mime }) {
-  if (!cfg.sttEnabled) return { text: '' };
-  if (!cfg.apiKey) return { text: '', error: 'Transcription needs an OpenAI key (Anthropic has no speech-to-text). Add one in settings or turn transcription off.' };
-  const previous = transcript.filter((e) => e.who === who).slice(-3).map((e) => e.text).join(' ').slice(-200);
-  const text = await provider.transcribe({
-    baseUrl: cfg.sttBaseUrl || cfg.baseUrl,
-    apiKey: cfg.apiKey,
-    model: cfg.sttModel,
-    audio: Buffer.from(buffer),
-    mime,
-    prompt: previous || undefined,
-    language: cfg.sttLanguage,
-  });
-  const clean = text.replace(/\s+/g, ' ').trim();
-  if (clean.length < 2 || HALLUCINATIONS.has(clean.toLowerCase())) return { text: '' };
+function addTranscriptEntry(who, text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return;
   const entry = { t: Date.now(), who, text: clean };
   transcript.push(entry);
   if (activeSession) sessions.append(activeSession.id, entry);
+  send('transcript:partial', { who, text: '' }); // the final supersedes the ghost text
   send('transcript:add', entry);
-  return { text: clean };
+}
+
+function startLiveStt() {
+  stopLiveStt();
+  if (!cfg.sttEnabled) return;
+
+  const bin = sidecarLib.locate(cfg.sidecarPath);
+  if (!bin) {
+    send('capture:status', {
+      level: 'warn',
+      text: 'Local transcription engine not found — recording audio only. Run scripts/build-sidecar.sh, or set the path in Settings.',
+    });
+    return;
+  }
+
+  for (const who of ['me', 'them']) {
+    const s = new sidecarLib.StreamingSidecar({
+      bin,
+      chunkMs: cfg.streamChunkMs,
+      eouDebounceMs: cfg.eouDebounceMs,
+      stableMs: cfg.sttStableMs,
+    });
+    s.on('partial', (text) => send('transcript:partial', { who, text }));
+    s.on('final', (text) => addTranscriptEntry(who, text));
+    s.on('error', (err) => send('capture:status', { level: 'bad', text: `Live transcription (${who}): ${err.message}` }));
+    liveStt[who] = s;
+    s.start().catch((err) => {
+      if (liveStt[who] === s) liveStt[who] = null;
+      send('capture:status', { level: 'bad', text: `Live transcription (${who}) failed to start: ${err.message}` });
+    });
+  }
+}
+
+function stopLiveStt() {
+  for (const who of ['me', 'them']) {
+    if (liveStt[who]) {
+      liveStt[who].removeAllListeners();
+      liveStt[who].stop();
+      liveStt[who] = null;
+    }
+  }
 }
 
 // =====================================================================
@@ -372,8 +411,50 @@ function startSession() {
     console.error('[pill] wav writers failed:', err.message);
   }
   send('transcript:reset', { session: activeSession, entries: [] });
+  startSystemAudio();
+  startLiveStt();
   pushStatus();
   return activeSession;
+}
+
+/**
+ * Brings up the system-audio tap for the "them" channel. Deliberately does not
+ * reject the session on failure — the mic half is still worth recording — but the
+ * failure is always visible, which is the part that was missing before.
+ */
+function startSystemAudio() {
+  stopSystemAudio();
+  const sa = new SystemAudio({ binaryPath: cfg.audioteePath || '' });
+  systemAudio = sa;
+
+  sa.on('data', (buf) => appendPcm('them', buf));
+  sa.on('error', (err) => {
+    send('capture:status', { channel: 'them', level: 'bad', text: err.message });
+  });
+  sa.on('quiet', (seconds) => {
+    send('capture:status', {
+      channel: 'them',
+      level: 'warn',
+      text: `No system audio for ${seconds}s — the other side won't be transcribed. Is their audio actually playing through this Mac?`,
+    });
+  });
+  sa.on('recovered', () => {
+    send('capture:status', { channel: 'them', level: 'ok', text: 'System audio flowing.' });
+  });
+
+  sa.start()
+    .then(() => send('capture:status', { channel: 'them', level: 'ok', text: 'System audio capture running.' }))
+    .catch((err) => {
+      if (systemAudio === sa) systemAudio = null;
+      send('capture:status', { channel: 'them', level: 'bad', text: err.message });
+    });
+}
+
+function stopSystemAudio() {
+  if (!systemAudio) return;
+  systemAudio.removeAllListeners();
+  systemAudio.stop();
+  systemAudio = null;
 }
 
 function closeWavWriters() {
@@ -392,26 +473,43 @@ function closeWavWriters() {
 }
 
 function appendPcm(who, buffer) {
+  if (!recording) return;
+  const buf = Buffer.from(buffer);
   const w = wavWriters[who];
-  if (!w || !recording) return;
-  try {
-    w.append(Buffer.from(buffer));
-  } catch (err) {
-    console.error(`[pill] wav append ${who}:`, err.message);
+  if (w) {
+    try {
+      w.append(buf);
+    } catch (err) {
+      console.error(`[pill] wav append ${who}:`, err.message);
+    }
   }
+  // Same bytes drive live transcription, so the archive and the live view can never
+  // disagree about what was heard.
+  if (process.env.PILL_DEBUG_PCM) {
+    _pcmDebug[who] = _pcmDebug[who] || { bytes: 0, calls: 0, written: 0 };
+    _pcmDebug[who].bytes += buf.length;
+    _pcmDebug[who].calls += 1;
+    if (liveStt[who] && liveStt[who].ready) _pcmDebug[who].written += buf.length;
+    if (_pcmDebug[who].calls % 20 === 0) {
+      console.error(`[pcm] ${who} calls=${_pcmDebug[who].calls} bytes=${_pcmDebug[who].bytes} written=${_pcmDebug[who].written} stt=${liveStt[who] ? (liveStt[who].ready ? 'ready' : 'NOT-READY') : 'NULL'}`);
+    }
+  }
+  if (liveStt[who]) liveStt[who].write(buf);
 }
 
 function stopRecording() {
   recording = false;
-  const finished = closeWavWriters();
+  stopSystemAudio();
+  stopLiveStt();
+  closeWavWriters();
   pushStatus();
-  if (activeSession && cfg.localRefine) refineSession(activeSession.id, finished);
+  if (activeSession && cfg.localRefine) refineSession(activeSession.id);
 }
 
 // =====================================================================
 // Local refinement (transcribe + diarize + speaker matching)
 // =====================================================================
-async function refineSession(sessionId) {
+async function refineSession(sessionId, { cloud = false } = {}) {
   const bin = sidecarLib.locate(cfg.sidecarPath);
   if (!bin) {
     send('refine:done', { sessionId, skipped: true, reason: 'Local engine not installed — kept the live transcript. See Settings → Local engine.' });
@@ -421,6 +519,25 @@ async function refineSession(sessionId) {
     send('refine:done', { sessionId, error: 'Another refinement is already running.' });
     return;
   }
+  if (cloud && !cfg.deepgramApiKey) {
+    send('refine:done', { sessionId, error: 'No Deepgram key set. Add one in Settings, or use the local engine.' });
+    return;
+  }
+
+  // Cloud mode swaps only the transcriber. Diarization stays local because Deepgram
+  // returns speaker labels but no embeddings, and the cross-meeting roster is built
+  // from embeddings — losing them would cost more than the better words are worth.
+  const engine = cloud
+    ? {
+      transcribe: (b, wav, o) => deepgram.transcribe(b, wav, {
+        ...o,
+        apiKey: cfg.deepgramApiKey,
+        language: cfg.cloudLanguage || 'en',
+      }),
+      diarize: sidecarLib.diarize,
+    }
+    : undefined;
+
   const paths = sessions.audioPaths(sessionId);
   refining = { sessionId, stage: 'starting' };
   pushStatus();
@@ -428,6 +545,7 @@ async function refineSession(sessionId) {
   try {
     const result = await refine({
       bin,
+      sidecar: engine,
       meWav: paths.me,
       themWav: paths.them,
       roster: speakers.all(),
@@ -450,7 +568,7 @@ async function refineSession(sessionId) {
       transcript = saved.entries;
       send('transcript:reset', { session: sessionAbstract(saved), entries: saved.entries });
     }
-    send('refine:done', { sessionId, stats: result.stats, seconds: Math.round((Date.now() - t0) / 1000) });
+    send('refine:done', { sessionId, stats: result.stats, cloud, seconds: Math.round((Date.now() - t0) / 1000) });
   } catch (err) {
     console.error('[pill] refine failed:', err.message);
     send('refine:done', { sessionId, error: err.message });
@@ -580,7 +698,7 @@ function registerIpc() {
   ipcMain.handle('config:set', (_e, patch) => {
     const clean = { ...patch };
     // The renderer shows masked keys; only accept real new ones.
-    for (const field of ['apiKey', 'anthropicApiKey']) {
+    for (const field of ['apiKey', 'anthropicApiKey', 'deepgramApiKey']) {
       if (typeof clean[field] === 'string') {
         const k = clean[field].trim();
         if (!k || k.includes('…')) delete clean[field];
@@ -605,19 +723,16 @@ function registerIpc() {
 
   ipcMain.handle('shot:capture', async () => ({ dataUrl: await captureScreen() }));
 
-  ipcMain.handle('stt:chunk', async (_e, payload) => {
-    try {
-      return await handleAudioChunk(payload);
-    } catch (err) {
-      return { text: '', error: err.message };
-    }
-  });
   ipcMain.handle('rec:started', () => startSession());
   ipcMain.handle('rec:stopped', () => stopRecording());
   ipcMain.on('rec:pcm', (_e, { who, buffer }) => appendPcm(who === 'me' ? 'me' : 'them', buffer));
   ipcMain.handle('speaker:rename', (_e, { sessionId, key, name }) => renameSpeaker(sessionId, key, name));
   ipcMain.handle('speaker:list', () => speakers.list());
-  ipcMain.handle('refine:run', (_e, id) => { refineSession(id || (activeSession && activeSession.id)); return true; });
+  ipcMain.handle('refine:run', (_e, arg) => {
+    const { id, cloud } = (arg && typeof arg === 'object') ? arg : { id: arg, cloud: false };
+    refineSession(id || (activeSession && activeSession.id), { cloud: Boolean(cloud) });
+    return true;
+  });
   ipcMain.handle('sidecar:status', () => sidecarLib.status(cfg.sidecarPath));
   ipcMain.handle('shortcuts:set', (_e, patch) => setShortcuts(patch));
   ipcMain.handle('stt:get', () => ({ session: activeSession, entries: transcript, recording }));
@@ -717,17 +832,6 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(media.has(permission)));
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => media.has(permission));
 
-  // getDisplayMedia -> primary screen with system-audio loopback. The renderer throws
-  // the video track away and keeps the audio: that is the "them" channel.
-  session.defaultSession.setDisplayMediaRequestHandler((_req, callback) => {
-    desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
-      .then((sources) => {
-        if (!sources.length) return callback({});
-        callback({ video: sources[0], audio: isMac ? 'loopback' : true });
-      })
-      .catch(() => callback({}));
-  }, { useSystemPicker: false });
-
   sessions.init(app);
   speakers.init(app);
   registerIpc();
@@ -737,6 +841,8 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  stopSystemAudio(); // the tap is a child process; it must not outlive the app
+  stopLiveStt();
   closeWavWriters(); // patch WAV headers so a mid-meeting quit still leaves readable audio
 });
 app.on('window-all-closed', () => app.quit());

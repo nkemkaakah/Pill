@@ -18,10 +18,41 @@ fi
 command -v swift > /dev/null || { echo "Swift not found — run: xcode-select --install" >&2; exit 1; }
 
 SRC=".sidecar-src"
+CLI="$SRC/Sources/FluidAudioCLI/FluidAudioCLI.swift"
+STREAM_DIR="$SRC/Sources/FluidAudioCLI/Commands/ASR/Parakeet/Streaming"
+
 if [[ -d "$SRC/.git" ]]; then
+  # Pill patches the vendored CLI (see below), so revert the one upstream file we
+  # touch before pulling — otherwise --ff-only refuses and the patch silently rots.
+  git -C "$SRC" checkout -- Sources/FluidAudioCLI/FluidAudioCLI.swift 2> /dev/null || true
   git -C "$SRC" pull --ff-only
 else
   git clone --depth 1 https://github.com/FluidInference/FluidAudio.git "$SRC"
+fi
+
+# --- Pill's patch -----------------------------------------------------------
+# Upstream's `parakeet-eou` reads a whole file and prints once, so live use would
+# mean re-spawning per utterance and paying model load every time. `parakeet-stream`
+# adds a stdin->NDJSON streaming mode on top of the same StreamingEouAsrManager.
+# The source of truth is sidecar-patch/, which is version-controlled with Pill.
+echo "Applying Pill's parakeet-stream patch…"
+mkdir -p "$STREAM_DIR"
+cp sidecar-patch/ParakeetStreamCommand.swift "$STREAM_DIR/ParakeetStreamCommand.swift"
+
+if ! grep -q '"parakeet-stream"' "$CLI"; then
+  python3 - "$CLI" <<'PY'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+anchor = '        case "parakeet-eou":\n            await ParakeetEouCommand.main(Array(arguments.dropFirst(2)))\n'
+if anchor not in src:
+    sys.exit("build-sidecar: could not find the parakeet-eou case to patch after; upstream layout changed.")
+src = src.replace(anchor, anchor + '        case "parakeet-stream":\n            await ParakeetStreamCommand.main(Array(arguments.dropFirst(2)))\n', 1)
+open(path, 'w').write(src)
+print("  registered parakeet-stream")
+PY
+else
+  echo "  parakeet-stream already registered"
 fi
 
 echo "Building fluidaudiocli (release)…"

@@ -34,6 +34,8 @@
   let session = null;          // { id, startedAt, title }
   let lines = 0;
   let lastLine = '';
+  let refineRunning = false;   // declared here so refreshSessionUi can read it during boot
+  let refineStage = '';
   let recStart = 0;
   let recTimer = null;
   let notesText = '';
@@ -318,15 +320,11 @@
   optShot.addEventListener('change', () => { api.setConfig({ attachScreenshot: optShot.checked }); refreshQuick(); });
 
   // ---------- recording ----------
+  // The renderer only captures the mic now and streams its PCM to main. System audio
+  // and all transcription live in the main process; problems arrive over capture:status.
   const listener = new PillAudio.Listener({
-    chunkMs: () => (cfg ? cfg.chunkSeconds : 6) * 1000,
-    silenceGate: () => (cfg ? cfg.silenceGate : 0.012),
     onLevel: drawMeter,
-    onChunk: async (who, buffer, mime) => {
-      const res = await api.sendAudioChunk(who, buffer, mime);
-      if (res && res.error) { lastLine = res.error; refreshStatus(); }
-    },
-    onError: (who, msg) => { lastLine = `${who}: ${msg}`; refreshStatus(); },
+    onError: (who, msg) => setCapture('bad', `${who}: ${msg}`),
   });
 
   async function startRecording() {
@@ -371,24 +369,91 @@
   const toggleRecording = () => (listener.active ? stopRecording() : startRecording());
   recBtn.addEventListener('click', toggleRecording);
 
-  function addLine(entry) {
-    lines += 1;
-    lastLine = entry.text.length > 60 ? `${entry.text.slice(0, 60)}…` : entry.text;
-    transcriptEmpty.style.display = 'none';
-    const line = document.createElement('div');
-    line.className = `tline ${entry.who}`;
-    line.innerHTML = '<span class="who"></span><span class="text"></span>';
-    const whoEl = line.querySelector('.who');
-    whoEl.textContent = entry.name || entry.who;
+  // Blocks are headed by the speaker and consecutive lines from the same person are
+  // grouped under one header, so a call reads as a conversation rather than a ledger.
+  let lastBlock = null;      // { el, bodyEl, speaker }
+  const partialEls = { me: null, them: null };
+
+  function speakerLabel(entry) {
+    if (entry.name) return entry.name;
+    return entry.who === 'me' ? 'You' : 'Them';
+  }
+  function speakerId(entry) { return entry.key || entry.who; }
+
+  function clockOf(t) {
+    return new Date(t || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  /** True when the user is already at the bottom, so scrolling back is never yanked. */
+  function transcriptAtBottom() {
+    return transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight < 80;
+  }
+  function maybeScroll(wasBottom) {
+    if (tab === 'transcript' && wasBottom) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function blockFor(entry) {
+    const id = speakerId(entry);
+    if (lastBlock && lastBlock.speaker === id) return lastBlock;
+
+    const el = document.createElement('div');
+    el.className = `tblock ${entry.who}`;
+    el.innerHTML = '<div class="thead"><span class="who"></span><span class="tstamp"></span></div><div class="tbody"></div>';
+
+    const whoEl = el.querySelector('.who');
+    whoEl.textContent = speakerLabel(entry);
     if (entry.key && entry.key !== 'me' && entry.key !== 'unknown') {
       whoEl.classList.add('clickable');
       whoEl.title = 'Click to name this speaker';
       whoEl.addEventListener('click', () => promptRename(entry.key, entry.name || 'Speaker'));
     }
-    line.querySelector('.text').textContent = entry.text;
-    transcriptEl.appendChild(line);
-    if (tab === 'transcript') transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    el.querySelector('.tstamp').textContent = clockOf(entry.t);
+
+    transcriptEl.appendChild(el);
+    lastBlock = { el, bodyEl: el.querySelector('.tbody'), speaker: id };
+    return lastBlock;
   }
+
+  function addLine(entry) {
+    const wasBottom = transcriptAtBottom();
+    lines += 1;
+    lastLine = entry.text.length > 60 ? `${entry.text.slice(0, 60)}…` : entry.text;
+    transcriptEmpty.style.display = 'none';
+
+    clearPartial(entry.who); // the final supersedes whatever ghost text was showing
+
+    const block = blockFor(entry);
+    const p = document.createElement('p');
+    p.className = 'tline';
+    p.textContent = entry.text;
+    block.bodyEl.appendChild(p);
+    maybeScroll(wasBottom);
+  }
+
+  /** Ghost text for an utterance still in progress; replaced in place when it lands. */
+  function setPartial(who, text) {
+    const wasBottom = transcriptAtBottom();
+    if (!text) { clearPartial(who); return; }
+    transcriptEmpty.style.display = 'none';
+    const block = blockFor({ who, t: Date.now() });
+    let el = partialEls[who];
+    if (!el || !el.isConnected) {
+      el = document.createElement('p');
+      el.className = 'tline partial';
+      partialEls[who] = el;
+    }
+    el.textContent = text;
+    if (el.parentElement !== block.bodyEl) block.bodyEl.appendChild(el);
+    maybeScroll(wasBottom);
+  }
+
+  function clearPartial(who) {
+    const el = partialEls[who];
+    if (el && el.isConnected) el.remove();
+    partialEls[who] = null;
+  }
+
+  api.onTranscriptPartial(({ who, text }) => setPartial(who === 'me' ? 'me' : 'them', text));
 
   // ---------- speakers ----------
   function renderSpeakerChips() {
@@ -451,6 +516,22 @@
     }
   }
 
+  // ---------- capture health ----------
+  // Good news clears itself; problems stay until the user dismisses them or the
+  // condition resolves. Nothing else in the UI is allowed to overwrite this.
+  let captureOkTimer = null;
+  function setCapture(level, text) {
+    const bar = $('capture-bar');
+    clearTimeout(captureOkTimer);
+    if (!level) { bar.hidden = true; return; }
+    bar.className = `capture-bar ${level}`;
+    bar.hidden = false;
+    $('capture-text').textContent = text;
+    if (level === 'ok') captureOkTimer = setTimeout(() => { bar.hidden = true; }, 4000);
+  }
+  $('capture-dismiss').addEventListener('click', () => { $('capture-bar').hidden = true; });
+  api.onCaptureStatus(({ level, text }) => setCapture(level, text));
+
   // ---------- refine banner ----------
   const STAGES = { starting: 'starting the local engine', transcribing: 'transcribing the recording', labelling: 'labelling speakers' };
   function setBanner(kind, text) {
@@ -466,7 +547,10 @@
     session = newSession;
     lines = 0;
     lastLine = '';
-    transcriptEl.querySelectorAll('.tline').forEach((n) => n.remove());
+    transcriptEl.querySelectorAll('.tblock').forEach((n) => n.remove());
+    lastBlock = null;
+    partialEls.me = null;
+    partialEls.them = null;
     transcriptEmpty.style.display = '';
     (entries || []).forEach(addLine);
     if (!sameSession && !keepNotes) {
@@ -492,6 +576,7 @@
       : 'Record a call, then generate notes.';
     $('btn-notes').disabled = !session || !lines;
     $('btn-notes').textContent = notesText ? 'Regenerate notes' : 'Generate notes';
+    refreshRerun();
     refreshQuick();
     refreshStatus();
   }
@@ -499,20 +584,74 @@
   api.onTranscript((entry) => { addLine(entry); refreshSessionUi(); });
   api.onTranscriptReset(({ session: s, entries }) => resetTranscript(s, entries));
 
+  function refreshRerun() {
+    const b = $('btn-rerun');
+    b.disabled = !session || refineRunning;
+    b.textContent = refineRunning ? 'Analysing…' : 'Re-analyse';
+    b.title = !session ? 'Load or record a session first' : (refineRunning ? 'Already running' : 'Re-run local transcription and speaker labelling');
+
+    const c = $('btn-rerun-cloud');
+    const hasKey = Boolean(cfg && cfg.hasDeepgramKey);
+    c.disabled = !session || refineRunning || !hasKey;
+    c.title = !hasKey
+      ? 'Add a Deepgram key in Settings to enable'
+      : (!session ? 'Load or record a session first' : 'Re-transcribe with Deepgram — this costs money');
+  }
+
   api.onRefineProgress(({ stage }) => {
-    setBanner('working', `Refining transcript locally — ${STAGES[stage] || stage}…`);
-    showTab('transcript');
+    refineRunning = true;
+    refineStage = STAGES[stage] || stage;
+    setBanner('working', `Refining transcript locally — ${refineStage}…`);
+    refreshRerun();
   });
-  api.onRefineDone(({ stats, seconds, error, skipped, reason }) => {
+
+  // The sidecar's own stdout, which main has always emitted on refine:log and nothing
+  // ever subscribed to. It is the only real progress signal during the long
+  // transcribing stage, where model download alone can take minutes.
+  api.onRefineLog(({ line }) => {
+    if (!refineRunning || !line) return;
+    const trimmed = String(line).trim().slice(0, 90);
+    if (trimmed) setBanner('working', `${refineStage || 'working'} — ${trimmed}`);
+  });
+
+  api.onRefineDone(({ stats, seconds, error, skipped, reason, cloud }) => {
+    refineRunning = false;
+    refreshRerun();
     if (error) { setBanner('bad', `Local refinement failed: ${error}`); return; }
     if (skipped) { setBanner('hint', reason || 'Local engine not installed.'); return; }
     const named = (session && session.speakers ? session.speakers.filter((x) => x.uid).length : 0);
     const voices = stats ? stats.voices : 0;
-    setBanner('working', '');
-    clearBanner();
-    if (voices > named) setBanner('hint', `Done in ${seconds}s — ${voices} voice${voices === 1 ? '' : 's'} found. Click a name chip above to tell Pill who's who; it will recognise them next time.`);
+    const words = stats ? (stats.meWords || 0) + (stats.themWords || 0) : 0;
+    if (voices > named) {
+      setBanner('hint', `Done in ${seconds}s — ${words} words, ${voices} voice${voices === 1 ? '' : 's'} found. Click a name chip above to tell Pill who's who; it will recognise them next time.`);
+    } else {
+      // Previously the banner was set then immediately cleared, so a clean run looked
+      // identical to nothing having happened.
+      setBanner('done', `${cloud ? 'Cloud re-analysed' : 'Re-analysed'} in ${seconds}s — ${words} words, ${voices} voice${voices === 1 ? '' : 's'}.`);
+      setTimeout(() => { if (!refineRunning) clearBanner(); }, 6000);
+    }
   });
-  $('btn-rerun').addEventListener('click', () => { if (session) { setBanner('working', 'Refining transcript locally…'); api.runRefine(session.id); } });
+
+  function startRefine(cloud) {
+    if (!session || refineRunning) return;
+    refineRunning = true;
+    refreshRerun();
+    setBanner('working', cloud
+      ? 'Re-transcribing with Deepgram — uploading audio…'
+      : 'Refining transcript locally — starting the local engine…');
+    api.runRefine({ id: session.id, cloud });
+  }
+
+  $('btn-rerun').addEventListener('click', () => startRefine(false));
+
+  // Spends money, so it asks first and says roughly how much.
+  $('btn-rerun-cloud').addEventListener('click', () => {
+    if (!session || refineRunning) return;
+    const mins = Math.max(1, Math.round(((session.endedAt || Date.now()) - session.startedAt) / 60000));
+    const est = (mins * 2 * 0.0043).toFixed(2); // both channels, pay-as-you-go
+    if (!window.confirm(`Re-transcribe this session with Deepgram?\n\nAbout ${mins} min across two channels — roughly $${est}.\nSpeaker names still come from the local engine.`)) return;
+    startRefine(true);
+  });
 
   $('session-title').addEventListener('change', (e) => {
     if (!session) return;
@@ -686,9 +825,12 @@
     f.maxOutputTokens.value = cfg.maxOutputTokens;
     f.sttEnabled.checked = cfg.sttEnabled;
     f.autoRecord.checked = cfg.autoRecord;
-    f.sttModel.value = cfg.sttModel;
-    f.sttBaseUrl.value = cfg.sttBaseUrl;
-    f.chunkSeconds.value = cfg.chunkSeconds;
+    f.deepgramApiKey.value = '';
+    f.deepgramApiKey.placeholder = cfg.hasDeepgramKey ? cfg.deepgramApiKey : 'paste to enable';
+    $('deepgram-key-state').textContent = cfg.hasDeepgramKey ? 'A key is saved. Paste a new one to replace it.' : 'No key — Cloud re-analyse is disabled.';
+    f.cloudLanguage.value = cfg.cloudLanguage || 'en';
+    f.streamChunkMs.value = String(cfg.streamChunkMs || 320);
+    f.eouDebounceMs.value = cfg.eouDebounceMs || 1280;
     f.transcriptScope.value = cfg.transcriptScope;
     f.transcriptWindowMinutes.value = cfg.transcriptWindowMinutes;
     f.invisible.checked = cfg.invisible;
@@ -712,8 +854,8 @@
     const f = settingsForm;
     const patch = {
       provider: f.provider.value,
-      anthropicFastModel: f.anthropicFastModel.value.trim() || 'claude-sonnet-5',
-      anthropicSmartModel: f.anthropicSmartModel.value.trim() || 'claude-opus-5',
+      anthropicFastModel: f.anthropicFastModel.value.trim() || 'claude-haiku-4-5',
+      anthropicSmartModel: f.anthropicSmartModel.value.trim() || 'claude-sonnet-5',
       baseUrl: f.baseUrl.value.trim() || 'https://api.openai.com/v1',
       fastModel: f.fastModel.value.trim(),
       smartModel: f.smartModel.value.trim(),
@@ -721,9 +863,8 @@
       maxOutputTokens: Number(f.maxOutputTokens.value) || 4096,
       sttEnabled: f.sttEnabled.checked,
       autoRecord: f.autoRecord.checked,
-      sttModel: f.sttModel.value.trim(),
-      sttBaseUrl: f.sttBaseUrl.value.trim() || 'https://api.openai.com/v1',
-      chunkSeconds: Math.min(20, Math.max(3, Number(f.chunkSeconds.value) || 6)),
+      streamChunkMs: Number(f.streamChunkMs.value) || 320,
+      eouDebounceMs: Math.min(4000, Math.max(300, Number(f.eouDebounceMs.value) || 1280)),
       transcriptScope: f.transcriptScope.value,
       transcriptWindowMinutes: Math.min(60, Math.max(2, Number(f.transcriptWindowMinutes.value) || 10)),
       invisible: f.invisible.checked,
@@ -733,6 +874,8 @@
       sidecarPath: f.sidecarPath.value.trim(),
     };
     if (f.apiKey.value.trim()) patch.apiKey = f.apiKey.value.trim();
+    if (f.deepgramApiKey.value.trim()) patch.deepgramApiKey = f.deepgramApiKey.value.trim();
+    patch.cloudLanguage = f.cloudLanguage.value;
     if (f.anthropicApiKey.value.trim()) patch.anthropicApiKey = f.anthropicApiKey.value.trim();
     cfg = await api.setConfig(patch);
     optShot.checked = cfg.attachScreenshot;
