@@ -112,7 +112,7 @@
       statusMain.textContent = session.title || 'Session';
       statusSub.textContent = `· ${lines} lines`;
     } else {
-      statusMain.textContent = 'Pill';
+      statusMain.textContent = 'Nola';
       statusSub.textContent = mode === 'pill' ? '⌃⌥↩ to open · drag me' : '';
     }
   }
@@ -162,13 +162,35 @@
       any = any || needs;
     }
     $('setup').classList.toggle('on', any);
-    $('perm-state').textContent = `mic: ${perms.mic} · screen: ${perms.screen}`;
+    renderPerms();
   }
+
+  const PERM_WORDS = { granted: 'allowed', denied: 'denied', restricted: 'blocked by policy', 'not-determined': 'not asked yet', unknown: 'unknown' };
+  function renderPerms() {
+    for (const k of ['mic', 'screen']) {
+      const li = document.querySelector(`#perm-list li[data-perm="${k}"]`);
+      const v = perms[k] || 'unknown';
+      li.classList.toggle('ok', v === 'granted');
+      li.classList.toggle('bad', v === 'denied' || v === 'restricted');
+      li.querySelector('.perm-val').textContent = PERM_WORDS[v] || v;
+    }
+  }
+  document.querySelectorAll('#perm-list [data-open]').forEach((b) => b.addEventListener('click', () => api.openPermissionSettings(b.dataset.open)));
+  $('btn-relaunch').addEventListener('click', () => api.relaunch());
+  $('btn-perms-reset').addEventListener('click', async () => {
+    if (!window.confirm('Forget every permission macOS has stored for this app and ask again?\n\nUse this when System Settings shows a switch as on but recording or screenshots still fail — that is a stale grant from an older build.')) return;
+    const res = await api.resetPermissions();
+    if (res && res.error) { $('perm-state').textContent = res.error; return; }
+    await grantPerms();
+    $('perm-state').textContent = 'Reset. Allow the microphone prompt, switch this app on under Screen Recording (and System Audio if listed), then press Relaunch.';
+  });
+  // Grants change in System Settings, so re-read them whenever the user comes back.
+  window.addEventListener('focus', () => { if (mode === 'panel') refreshSetup(); });
   async function grantPerms() {
     perms = await api.requestPermissions();
     await refreshSetup();
     if (perms.screen !== 'granted') {
-      $('setup-note').textContent = 'macOS only applies Screen Recording after a restart: enable Pill (or Electron) in System Settings → Privacy & Security → Screen Recording, then quit (⌃⌥X) and reopen.';
+      $('setup-note').textContent = 'macOS only applies Screen Recording after a restart: enable Nkemka\'s Notetaker (or Electron, when run from source) in System Settings → Privacy & Security → Screen Recording, then quit (⌃⌥X) and reopen.';
     } else {
       $('setup-note').textContent = '';
     }
@@ -177,7 +199,7 @@
   $('setup-grant-mic').addEventListener('click', grantPerms);
   $('btn-perms').addEventListener('click', async () => {
     await grantPerms();
-    $('perm-state').textContent = `mic: ${perms.mic} · screen: ${perms.screen}` + (perms.screen !== 'granted' ? ' — quit and reopen after enabling' : '');
+    if (perms.screen !== 'granted') $('perm-state').textContent = 'Switch this app on under Screen Recording, then press Relaunch — macOS only applies it on restart.';
   });
 
   // ---------- chat ----------
@@ -405,7 +427,7 @@
     if (entry.key && entry.key !== 'me' && entry.key !== 'unknown') {
       whoEl.classList.add('clickable');
       whoEl.title = 'Click to name this speaker';
-      whoEl.addEventListener('click', () => promptRename(entry.key, entry.name || 'Speaker'));
+      whoEl.addEventListener('click', () => promptRename(entry.key, entry.name || 'Speaker', whoEl));
     }
     el.querySelector('.tstamp').textContent = clockOf(entry.t);
 
@@ -466,7 +488,8 @@
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = `speaker-chip${named ? ' named' : ''}`;
-      chip.title = named ? 'Recognised from a previous meeting — click to correct the name' : 'Click to name this voice; Pill will recognise it in future meetings';
+      chip.dataset.key = sp.key;
+      chip.title = named ? 'Recognised from a previous meeting — click to correct the name' : 'Click to name this voice; Nola will recognise it in future meetings';
       chip.innerHTML = '<span class="nm"></span><span class="secs"></span>';
       chip.querySelector('.nm').textContent = named ? sp.name : `${sp.name} — name?`;
       chip.querySelector('.secs').textContent = `${Math.round(sp.seconds || 0)}s`;
@@ -476,11 +499,19 @@
   }
 
   function beginChipRename(chip, sp) {
+    beginInlineRename(chip, sp.key, sp.uid ? sp.name : '', sp.name);
+  }
+
+  /**
+   * Swaps any element for a text input and renames the speaker on Enter. Used by the
+   * chips and, when a speaker has no chip, by the name above their transcript lines.
+   */
+  function beginInlineRename(el, key, value, placeholder) {
     const input = document.createElement('input');
     input.className = 'chip-input';
-    input.value = sp.uid ? sp.name : '';
-    input.placeholder = sp.name;
-    chip.replaceWith(input);
+    input.value = value;
+    input.placeholder = placeholder;
+    el.replaceWith(input);
     input.focus();
     input.select();
     let finished = false;
@@ -489,11 +520,11 @@
       finished = true;
       const name = input.value.trim();
       if (commit && name && session) {
-        const res = await api.renameSpeaker(session.id, sp.key, name);
-        if (res && res.error) { if (input.isConnected) input.replaceWith(chip); setBanner('bad', res.error); return; }
-        if (input.isConnected) input.replaceWith(chip); // transcript:reset re-renders everything anyway
-      } else {
-        input.replaceWith(chip);
+        const res = await api.renameSpeaker(session.id, key, name);
+        if (input.isConnected) input.replaceWith(el); // transcript:reset re-renders everything anyway
+        if (res && res.error) setBanner('bad', res.error);
+      } else if (input.isConnected) {
+        input.replaceWith(el);
       }
     };
     input.addEventListener('keydown', (e) => {
@@ -503,17 +534,13 @@
     input.addEventListener('blur', () => done(false));
   }
 
-  function promptRename(key, current) {
-    showTab('transcript');
-    const chips = $('speaker-chips');
+  function promptRename(key, current, whoEl) {
     const list = (session && session.speakers) || [];
-    const idx = list.findIndex((x) => x.key === key);
-    const chip = chips.children[idx];
-    if (chip && chip.classList.contains('speaker-chip')) beginChipRename(chip, list[idx]);
-    else if (session) {
-      const name = window.prompt(`Name for ${current}?`);
-      if (name && name.trim()) api.renameSpeaker(session.id, key, name.trim());
-    }
+    const sp = list.find((x) => x.key === key);
+    const chip = $('speaker-chips').querySelector(`.speaker-chip[data-key="${CSS.escape(key)}"]`);
+    if (chip && sp) { showTab('transcript'); beginChipRename(chip, sp); return; }
+    // No chip (e.g. the speaker list hasn't caught up): edit the name where it was clicked.
+    if (session && whoEl && whoEl.isConnected) beginInlineRename(whoEl, key, sp && sp.uid ? sp.name : '', current);
   }
 
   // ---------- capture health ----------
@@ -623,7 +650,7 @@
     const voices = stats ? stats.voices : 0;
     const words = stats ? (stats.meWords || 0) + (stats.themWords || 0) : 0;
     if (voices > named) {
-      setBanner('hint', `Done in ${seconds}s — ${words} words, ${voices} voice${voices === 1 ? '' : 's'} found. Click a name chip above to tell Pill who's who; it will recognise them next time.`);
+      setBanner('hint', `Done in ${seconds}s — ${words} words, ${voices} voice${voices === 1 ? '' : 's'} found. Click a name chip above to tell Nola who's who; it will recognise them next time.`);
     } else {
       // Previously the banner was set then immediately cleared, so a clean run looked
       // identical to nothing having happened.
@@ -660,8 +687,15 @@
     refreshSessionUi();
   });
   $('btn-copy-transcript').addEventListener('click', async () => {
-    const text = [...transcriptEl.querySelectorAll('.tline')].map((l) => `${l.querySelector('.who').textContent}: ${l.querySelector('.text').textContent}`).join('\n');
+    // Blocks group consecutive lines under one speaker header, so read the name from the block.
+    const text = [...transcriptEl.querySelectorAll('.tblock')].flatMap((blk) => {
+      const who = blk.querySelector('.who').textContent;
+      return [...blk.querySelectorAll('.tline:not(.partial)')].map((l) => `${who}: ${l.textContent}`);
+    }).join('\n');
     await navigator.clipboard.writeText(text);
+    const b = $('btn-copy-transcript');
+    b.textContent = 'Copied';
+    setTimeout(() => { b.textContent = 'Copy'; }, 1200);
   });
   $('btn-new-session').addEventListener('click', async () => {
     if (listener.active) await stopRecording();
@@ -804,6 +838,8 @@
     document.querySelectorAll('.provider-block').forEach((b) => b.classList.toggle('on', b.dataset.provider === p));
   }
   settingsForm.provider.addEventListener('change', showProviderBlocks);
+  // Links in settings open in the browser, never inside the app window.
+  settingsForm.querySelectorAll('a.ext').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); api.openExternal(a.href); }));
 
   function fillSettings() {
     if (!cfg) return;
@@ -815,6 +851,11 @@
     $('anthropic-key-state').textContent = cfg.hasAnthropicKey ? 'A key is saved. Paste a new one to replace it.' : 'No key yet.';
     f.anthropicFastModel.value = cfg.anthropicFastModel;
     f.anthropicSmartModel.value = cfg.anthropicSmartModel;
+    f.geminiApiKey.value = '';
+    f.geminiApiKey.placeholder = cfg.hasGeminiKey ? cfg.geminiApiKey : 'AIza…';
+    $('gemini-key-state').textContent = cfg.hasGeminiKey ? 'A key is saved. Paste a new one to replace it.' : 'No key yet.';
+    f.geminiFastModel.value = cfg.geminiFastModel || 'gemini-3.5-flash-lite';
+    f.geminiSmartModel.value = cfg.geminiSmartModel || 'gemini-3.8-flash';
     f.apiKey.value = '';
     f.apiKey.placeholder = cfg.hasKey ? cfg.apiKey : 'sk-…';
     $('key-state').textContent = cfg.hasKey ? 'A key is saved. Paste a new one to replace it.' : 'No key yet.';
@@ -829,6 +870,13 @@
     f.deepgramApiKey.placeholder = cfg.hasDeepgramKey ? cfg.deepgramApiKey : 'paste to enable';
     $('deepgram-key-state').textContent = cfg.hasDeepgramKey ? 'A key is saved. Paste a new one to replace it.' : 'No key — Cloud re-analyse is disabled.';
     f.cloudLanguage.value = cfg.cloudLanguage || 'en';
+    f.deepseekApiKey.value = '';
+    f.deepseekApiKey.placeholder = cfg.hasDeepseekKey ? cfg.deepseekApiKey : 'sk-or-…';
+    $('deepseek-key-state').textContent = cfg.hasDeepseekKey ? 'A key is saved. Paste a new one to replace it.' : 'No key — every question goes to your main provider above.';
+    f.deepseekFastModel.value = cfg.deepseekFastModel || 'deepseek/deepseek-v3.2';
+    f.deepseekSmartModel.value = cfg.deepseekSmartModel || 'deepseek/deepseek-v3.2';
+    f.deepseekBaseUrl.value = cfg.deepseekBaseUrl || 'https://openrouter.ai/api/v1';
+    refreshContextState();
     f.streamChunkMs.value = String(cfg.streamChunkMs || 320);
     f.eouDebounceMs.value = cfg.eouDebounceMs || 1280;
     f.transcriptScope.value = cfg.transcriptScope;
@@ -838,7 +886,7 @@
     f.systemPrompt.value = cfg.systemPrompt || '';
     f.localRefine.checked = cfg.localRefine;
     f.sidecarPath.value = cfg.sidecarPath || '';
-    $('perm-state').textContent = `mic: ${perms.mic} · screen: ${perms.screen}`;
+    refreshSetup(); // live, not whatever was true when the panel opened
     refreshSidecarState();
   }
 
@@ -849,6 +897,23 @@
       : (st.reason || 'Not found.');
   }
 
+  async function refreshContextState() {
+    const st = await api.contextStatus();
+    $('context-state').textContent = st.name
+      ? `${st.name} — ${st.chars.toLocaleString()} characters, added ${new Date(st.uploadedAt).toLocaleDateString()}`
+      : 'No document added yet.';
+  }
+  $('btn-context-upload').addEventListener('click', async () => {
+    const res = await api.uploadContext();
+    if (res && res.canceled) return;
+    if (res && res.error) { $('context-state').textContent = `Error: ${res.error}`; return; }
+    await refreshContextState();
+  });
+  $('btn-context-remove').addEventListener('click', async () => {
+    await api.removeContext();
+    await refreshContextState();
+  });
+
   settingsForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = settingsForm;
@@ -856,6 +921,8 @@
       provider: f.provider.value,
       anthropicFastModel: f.anthropicFastModel.value.trim() || 'claude-haiku-4-5',
       anthropicSmartModel: f.anthropicSmartModel.value.trim() || 'claude-sonnet-5',
+      geminiFastModel: f.geminiFastModel.value.trim() || 'gemini-3.5-flash-lite',
+      geminiSmartModel: f.geminiSmartModel.value.trim() || 'gemini-3.8-flash',
       baseUrl: f.baseUrl.value.trim() || 'https://api.openai.com/v1',
       fastModel: f.fastModel.value.trim(),
       smartModel: f.smartModel.value.trim(),
@@ -877,6 +944,11 @@
     if (f.deepgramApiKey.value.trim()) patch.deepgramApiKey = f.deepgramApiKey.value.trim();
     patch.cloudLanguage = f.cloudLanguage.value;
     if (f.anthropicApiKey.value.trim()) patch.anthropicApiKey = f.anthropicApiKey.value.trim();
+    if (f.geminiApiKey.value.trim()) patch.geminiApiKey = f.geminiApiKey.value.trim();
+    if (f.deepseekApiKey.value.trim()) patch.deepseekApiKey = f.deepseekApiKey.value.trim();
+    patch.deepseekBaseUrl = f.deepseekBaseUrl.value.trim() || 'https://openrouter.ai/api/v1';
+    patch.deepseekFastModel = f.deepseekFastModel.value.trim() || 'deepseek/deepseek-v3.2';
+    patch.deepseekSmartModel = f.deepseekSmartModel.value.trim() || 'deepseek/deepseek-v3.2';
     cfg = await api.setConfig(patch);
     optShot.checked = cfg.attachScreenshot;
     await refreshSetup();
@@ -985,7 +1057,7 @@
     if (!cfg.chatReady) {
       await setMode('panel');
       showTab('settings');
-      statusMain.textContent = 'Pill';
+      statusMain.textContent = 'Nola';
       statusSub.textContent = 'add an API key';
     } else {
       showTab('chat');

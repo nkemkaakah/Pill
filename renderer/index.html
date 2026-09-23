@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'none'" />
-  <title>Pill</title>
+  <title>Nkemka's Notetaker</title>
   <link rel="stylesheet" href="../node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -14,7 +14,7 @@
     <header id="capsule" class="capsule">
       <canvas id="meter" class="meter" width="48" height="28" aria-hidden="true"></canvas>
       <div id="status" class="status" title="Click to open">
-        <span id="status-main" class="status-main">Pill</span>
+        <span id="status-main" class="status-main">Nola</span>
         <span id="status-sub" class="status-sub"></span>
       </div>
       <div class="capsule-actions">
@@ -65,17 +65,17 @@
         </div>
 
         <div class="quick" id="quick">
-          <button data-action="answer" data-needs="transcript" title="Uses the transcript and a screenshot">
-            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>Answer what was asked
+          <button data-action="answer" data-needs="transcript" title="Answer the question just asked — uses the transcript and a screenshot">
+            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>Answer it
           </button>
-          <button data-action="solve" title="Uses a screenshot">
-            <svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="10" rx="2"/><path d="M7 17h6"/></svg>Solve what's on screen
+          <button data-action="solve" title="Solve what's on screen — uses a screenshot">
+            <svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="10" rx="2"/><path d="M7 17h6"/></svg>Solve screen
           </button>
-          <button data-action="say" data-needs="transcript" title="Uses the transcript">
-            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>What should I say?
+          <button data-action="say" data-needs="transcript" title="Suggest what to say next — uses the transcript">
+            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>What to say
           </button>
-          <button data-action="recap" data-needs="transcript" title="Uses the whole transcript">
-            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>Recap so far
+          <button data-action="recap" data-needs="transcript" title="Recap the call so far — uses the whole transcript">
+            <svg viewBox="0 0 20 20"><path d="M4 5h12M4 9h12M4 13h8"/></svg>Recap
           </button>
         </div>
 
@@ -157,6 +157,7 @@
             <span>Answers come from</span>
             <select name="provider">
               <option value="anthropic">Anthropic (Claude)</option>
+              <option value="gemini">Google (Gemini)</option>
               <option value="openai">OpenAI, or any OpenAI-compatible endpoint</option>
             </select>
           </label>
@@ -172,6 +173,19 @@
               <label><span>Smart model</span><input type="text" name="anthropicSmartModel" /></label>
             </div>
             <small class="block-note">Current IDs: claude-haiku-4-5 (cheapest), claude-sonnet-5, claude-opus-5, claude-fable-5-1. Notes use the smart model.</small>
+          </div>
+
+          <div class="provider-block" data-provider="gemini">
+            <label>
+              <span>Gemini API key</span>
+              <input type="password" name="geminiApiKey" placeholder="AIza…" autocomplete="off" />
+              <small id="gemini-key-state"></small>
+            </label>
+            <div class="two">
+              <label><span>Fast model</span><input type="text" name="geminiFastModel" /></label>
+              <label><span>Smart model</span><input type="text" name="geminiSmartModel" /></label>
+            </div>
+            <small class="block-note">Get a key at <a href="https://aistudio.google.com/apikey" class="ext">aistudio.google.com/apikey</a>. Current IDs: gemini-3.5-flash-lite (cheapest, $0.30 / $2.50 per million tokens), gemini-3.8-flash (strongest stable), gemini-3.1-pro-preview (most capable, preview). Sees screenshots. Notes use the smart model.</small>
           </div>
 
           <div class="provider-block" data-provider="openai">
@@ -190,8 +204,24 @@
             <span>OpenAI API key</span>
             <input type="password" name="apiKey" placeholder="sk-…" autocomplete="off" />
             <small id="key-state"></small>
-            <small>Used for OpenAI answers and always for transcription (Anthropic has no speech-to-text).</small>
+            <small>Only used when answers come from OpenAI or an OpenAI-compatible endpoint. Transcription runs locally and needs no key.</small>
           </label>
+
+          <h3>DeepSeek (via OpenRouter)</h3>
+          <label>
+            <span>OpenRouter API key</span>
+            <input type="password" name="deepseekApiKey" placeholder="sk-or-…" autocomplete="off" />
+            <small id="deepseek-key-state"></small>
+          </label>
+          <div class="two">
+            <label><span>Fast model</span><input type="text" name="deepseekFastModel" /></label>
+            <label><span>Smart model</span><input type="text" name="deepseekSmartModel" /></label>
+          </div>
+          <label>
+            <span>Base URL</span>
+            <input type="text" name="deepseekBaseUrl" placeholder="https://openrouter.ai/api/v1" />
+          </label>
+          <small class="block-note">Only used for questions with <b>no</b> screenshot attached — DeepSeek's chat model can't see images, so anything visual (the screenshot toggle on, or a quick action like "solve what's on screen") always goes to your main provider above regardless of this key. Meeting notes are text-only and always use DeepSeek once a key is set here. Default model deepseek/deepseek-v3.2 runs about $0.21 / $0.31 per million tokens via OpenRouter — cheaper than every model above.</small>
 
           <div class="two">
             <label>
@@ -208,7 +238,7 @@
 
           <h3>Recording</h3>
           <label class="toggle"><input type="checkbox" name="sttEnabled" /><span>Transcribe audio while recording</span></label>
-          <label class="toggle"><input type="checkbox" name="autoRecord" /><span>Start recording when Pill launches</span></label>
+          <label class="toggle"><input type="checkbox" name="autoRecord" /><span>Start recording when Nola launches</span></label>
           <div class="two">
             <label>
               <span>Live latency</span>
@@ -265,6 +295,14 @@
           </label>
           <small class="block-note">Only used when you press <b>Cloud re-analyse</b> on the Transcript tab — never automatically. Adds punctuation and capitalisation the local models don't produce. Billed per second of audio per channel, roughly $0.52 for a one-hour two-person call. Speaker names still come from the local engine, which is the only one that produces voiceprints.</small>
 
+          <h3>Context document</h3>
+          <div class="settings-actions">
+            <button type="button" class="text-btn" id="btn-context-upload">Add / replace document…</button>
+            <button type="button" class="text-btn danger" id="btn-context-remove">Remove</button>
+          </div>
+          <small id="context-state" class="block-note">No document added yet.</small>
+          <small class="block-note">One file — .txt, .md, or .pdf. Its text is added to every question and to notes, as background about you, kept separate from the instructions below so it's read as reference rather than followed as commands. Only the extracted text is kept; the original file isn't stored.</small>
+
           <h3>Behaviour</h3>
           <label class="toggle"><input type="checkbox" name="invisible" /><span>Hidden from screen share and recordings</span></label>
           <label class="toggle"><input type="checkbox" name="attachScreenshot" /><span>Attach a screenshot to every question by default</span></label>
@@ -275,9 +313,20 @@
 
           <div class="settings-actions">
             <button type="submit" class="primary">Save</button>
-            <button type="button" class="text-btn" id="btn-perms">Grant mic + screen</button>
-            <span id="perm-state" class="perm-state"></span>
           </div>
+
+          <h3>Permissions</h3>
+          <ul class="perm-list" id="perm-list">
+            <li data-perm="mic"><span class="perm-dot"></span><span class="perm-name">Microphone</span><span class="perm-val"></span><button type="button" class="text-btn" data-open="mic">Open settings</button></li>
+            <li data-perm="screen"><span class="perm-dot"></span><span class="perm-name">Screen Recording</span><span class="perm-val"></span><button type="button" class="text-btn" data-open="screen">Open settings</button></li>
+            <li data-perm="audio"><span class="perm-dot"></span><span class="perm-name">System audio</span><span class="perm-val">asked when you first record</span><button type="button" class="text-btn" data-open="audio">Open settings</button></li>
+          </ul>
+          <div class="settings-actions">
+            <button type="button" class="text-btn" id="btn-perms">Ask again</button>
+            <button type="button" class="text-btn" id="btn-perms-reset" title="Forget every stored grant for this app, including stale ones from an older build, then ask fresh">Reset &amp; ask again</button>
+            <button type="button" class="text-btn" id="btn-relaunch">Relaunch</button>
+          </div>
+          <small id="perm-state" class="block-note">macOS only re-reads Screen Recording when the app starts — after switching it on or off, press Relaunch.</small>
 
           <details class="shortcuts" open>
             <summary>Shortcuts — click one, then press the new keys (Esc cancels, Backspace disables)</summary>
@@ -286,7 +335,7 @@
           </details>
 
           <div class="settings-foot">
-            <button type="button" class="text-btn danger" id="btn-quit">Quit Pill</button>
+            <button type="button" class="text-btn danger" id="btn-quit">Quit Nola</button>
           </div>
         </form>
       </section>

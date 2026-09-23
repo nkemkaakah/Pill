@@ -1,7 +1,7 @@
 'use strict';
 const {
   app, BrowserWindow, ipcMain, globalShortcut, screen, session,
-  desktopCapturer, systemPreferences, nativeImage, Menu, shell,
+  desktopCapturer, systemPreferences, nativeImage, Menu, shell, dialog,
 } = require('electron');
 const path = require('path');
 const config = require('./lib/config');
@@ -11,11 +11,20 @@ const sessions = require('./lib/sessions');
 const speakers = require('./lib/speakers');
 const sidecarLib = require('./lib/sidecar');
 const deepgram = require('./lib/deepgram');
+const contextLib = require('./lib/context');
+const { chooseRoute, credentialsFor } = require('./lib/route');
 const { refine } = require('./lib/refine');
 const { WavWriter } = require('./lib/wav');
 const { SystemAudio } = require('./lib/systemaudio');
 
 const isMac = process.platform === 'darwin';
+
+const APP_NAME = "Nkemka's Notetaker";
+const ICON_PATH = path.join(__dirname, 'build', 'icon.png');
+// userData is derived from the app name, so renaming would orphan every saved setting
+// and session. Pin it to the folder the app has always used.
+app.setPath('userData', path.join(app.getPath('appData'), 'Pill'));
+app.setName(APP_NAME);
 
 // The "them" channel used to come from getDisplayMedia({audio:'loopback'}), which
 // Electron supports on Windows only — on macOS the audio track never existed and the
@@ -180,6 +189,14 @@ function toggleVisible() {
   else win.showInactive();
 }
 
+// Dock click: bring up the full panel, focused, wherever the pill was left.
+function showPanel() {
+  if (!win) return;
+  if (!win.isVisible()) win.show();
+  if (mode !== 'panel') setMode('panel');
+  win.focus();
+}
+
 function nudge(dx, dy) {
   if (!win) return;
   const b = win.getBounds();
@@ -275,7 +292,7 @@ async function ask({ question, action, withScreenshot, smart }) {
   if (wantsShot) {
     try {
       screenshot = await captureScreen();
-      if (!screenshot) send('chat:notice', { id, text: 'Screenshot came back empty. Grant Screen Recording in System Settings, then quit and reopen Pill.' });
+      if (!screenshot) send('chat:notice', { id, text: 'Screenshot came back empty. Grant Screen Recording in System Settings, then quit and reopen Nola.' });
     } catch (err) {
       send('chat:notice', { id, text: `Screenshot failed: ${err.message}` });
     }
@@ -289,27 +306,31 @@ async function ask({ question, action, withScreenshot, smart }) {
   const priorHistory = prompts.stripImages(history.slice(-14));
   history.push(userMsg);
 
+  const contextText = contextLib.readText(app);
   const messages = [
-    { role: 'system', content: prompts.buildSystem(cfg.systemPrompt) },
+    { role: 'system', content: prompts.buildSystem(cfg.systemPrompt, contextText) },
     ...priorHistory,
     userMsg,
   ];
 
-  const useAnthropic = cfg.provider === 'anthropic';
-  const model = useAnthropic
-    ? (smart ? cfg.anthropicSmartModel : cfg.anthropicFastModel)
-    : (smart ? cfg.smartModel : cfg.fastModel);
+  // Routed per-request, not by the global provider setting: a screenshot-free question
+  // with a DeepSeek key configured goes to DeepSeek: cheap, and text-only anyway.
+  // Anything with a screenshot (wantsShot, computed above) always uses the configured
+  // primary provider — DeepSeek's chat model can't see images. See lib/route.js.
+  const route = chooseRoute({ hasScreenshot: wantsShot, hasDeepseekKey: Boolean(cfg.deepseekApiKey) });
+  const creds = credentialsFor(route, cfg, smart);
   let full = '';
   try {
-    if (!config.chatReady(cfg)) {
-      throw new Error(useAnthropic
-        ? 'No Anthropic key set. Open settings (the gear) and paste one.'
-        : 'No OpenAI key set. Open settings (the gear) and paste one, or point Base URL at a local model.');
+    if (route === 'primary' && !config.chatReady(cfg)) {
+      throw new Error({
+        anthropic: 'No Anthropic key set. Open Settings and paste one.',
+        gemini: 'No Gemini key set. Open Settings and paste one from aistudio.google.com/apikey.',
+      }[cfg.provider] || 'No OpenAI key set. Open Settings and paste one, or point Base URL at a local model.');
     }
-    full = await provider.chat(cfg.provider, {
-      baseUrl: useAnthropic ? cfg.anthropicBaseUrl : cfg.baseUrl,
-      apiKey: useAnthropic ? cfg.anthropicApiKey : cfg.apiKey,
-      model,
+    full = await provider.chat(creds.provider, {
+      baseUrl: creds.baseUrl,
+      apiKey: creds.apiKey,
+      model: creds.model,
       messages,
       reasoningEffort: cfg.reasoningEffort,
       maxTokens: cfg.maxOutputTokens,
@@ -317,14 +338,14 @@ async function ask({ question, action, withScreenshot, smart }) {
       onDelta: (delta) => send('chat:delta', { id, text: delta }),
     });
     history.push({ role: 'assistant', content: full });
-    send('chat:done', { id, text: full, model });
+    send('chat:done', { id, text: full, model: creds.model, via: route });
   } catch (err) {
     if (err.name === 'AbortError') {
       if (full) history.push({ role: 'assistant', content: full });
-      send('chat:done', { id, text: full, aborted: true, model });
+      send('chat:done', { id, text: full, aborted: true, model: creds.model });
     } else {
       history.pop(); // drop the failed user turn so a retry is clean
-      send('chat:done', { id, text: full, error: err.message, model });
+      send('chat:done', { id, text: full, error: err.message, model: creds.model });
     }
   } finally {
     if (currentRequest && currentRequest.id === id) currentRequest = null;
@@ -615,7 +636,7 @@ function renameSpeaker(sessionId, key, name) {
 function loadSession(id) {
   const s = sessions.load(id);
   if (!s) return null;
-  if (recording) return { error: 'Stop the current recording before opening another activeSession.' };
+  if (recording) return { error: 'Stop the current recording before opening another session.' };
   activeSession = { id: s.id, startedAt: s.startedAt, title: s.title, refined: s.refined, speakers: s.speakers };
   transcript = s.entries;
   send('transcript:reset', { session: sessionAbstract(s), entries: transcript });
@@ -628,20 +649,24 @@ async function generateNotes() {
   if (notesRequest) notesRequest.abort();
   const controller = new AbortController();
   notesRequest = controller;
-  const useAnthropic = cfg.provider === 'anthropic';
-  const model = useAnthropic ? cfg.anthropicSmartModel : cfg.smartModel;
+  // Notes are always post-call and always text-only, so they always qualify for the
+  // same DeepSeek routing a screenshot-free question would get — the one place this
+  // rule has a real effect beyond per-question chat. See lib/route.js.
+  const route = chooseRoute({ hasScreenshot: false, hasDeepseekKey: Boolean(cfg.deepseekApiKey) });
+  const creds = credentialsFor(route, cfg, true); // notes always use the smart tier
+  const contextText = contextLib.readText(app);
   const messages = [
-    { role: 'system', content: prompts.buildSystem(cfg.systemPrompt) },
+    { role: 'system', content: prompts.buildSystem(cfg.systemPrompt, contextText) },
     { role: 'user', content: `${prompts.formatWholeTranscript(transcript, 120_000)}\n\n${prompts.NOTES_PROMPT}` },
   ];
   send('notes:start', { sessionId: activeSession.id });
   let full = '';
   try {
-    if (!config.chatReady(cfg)) throw new Error('No API key set for the selected provider.');
-    full = await provider.chat(cfg.provider, {
-      baseUrl: useAnthropic ? cfg.anthropicBaseUrl : cfg.baseUrl,
-      apiKey: useAnthropic ? cfg.anthropicApiKey : cfg.apiKey,
-      model,
+    if (route === 'primary' && !config.chatReady(cfg)) throw new Error('No API key set for the selected provider.');
+    full = await provider.chat(creds.provider, {
+      baseUrl: creds.baseUrl,
+      apiKey: creds.apiKey,
+      model: creds.model,
       messages,
       reasoningEffort: 'medium',
       maxTokens: 4096,
@@ -676,6 +701,30 @@ async function permissionStatus() {
   };
 }
 
+// macOS keys permission grants to the bundle ID + code signature. From source, the
+// process is the stock Electron.app, so that is whose records get reset.
+function bundleId() {
+  return app.isPackaged ? require('./package.json').build.appId : 'com.github.Electron';
+}
+
+// Clears this app's stored grants, including stale ones left by an older build whose
+// signature no longer matches, so the next request shows a real prompt again.
+function resetPermissions() {
+  if (!isMac) return { ok: true };
+  const { execFileSync } = require('child_process');
+  const failed = [];
+  for (const svc of ['Microphone', 'ScreenCapture', 'AudioCapture']) {
+    try { execFileSync('/usr/bin/tccutil', ['reset', svc, bundleId()], { stdio: 'ignore' }); } catch (_) { failed.push(svc); }
+  }
+  return failed.length ? { error: `Could not reset: ${failed.join(', ')}` } : { ok: true };
+}
+
+const PRIVACY_PANES = {
+  mic: 'Privacy_Microphone',
+  screen: 'Privacy_ScreenCapture',
+  audio: 'Privacy_AudioCapture',
+};
+
 async function requestPermissions() {
   if (!isMac) return permissionStatus();
   if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
@@ -698,7 +747,7 @@ function registerIpc() {
   ipcMain.handle('config:set', (_e, patch) => {
     const clean = { ...patch };
     // The renderer shows masked keys; only accept real new ones.
-    for (const field of ['apiKey', 'anthropicApiKey', 'deepgramApiKey']) {
+    for (const field of ['apiKey', 'anthropicApiKey', 'deepgramApiKey', 'deepseekApiKey', 'geminiApiKey']) {
       if (typeof clean[field] === 'string') {
         const k = clean[field].trim();
         if (!k || k.includes('…')) delete clean[field];
@@ -734,6 +783,36 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle('sidecar:status', () => sidecarLib.status(cfg.sidecarPath));
+
+  ipcMain.handle('context:status', () => ({
+    name: cfg.contextDocName || '',
+    chars: cfg.contextDocChars || 0,
+    uploadedAt: cfg.contextDocUploadedAt || 0,
+  }));
+  ipcMain.handle('context:upload', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Add a context document',
+      properties: ['openFile'],
+      filters: [{ name: 'Documents', extensions: ['txt', 'md', 'pdf'] }],
+    });
+    if (res.canceled || !res.filePaths.length) return { canceled: true };
+    try {
+      const meta = await contextLib.ingest(app, res.filePaths[0]);
+      cfg = config.save(app, {
+        contextDocName: meta.filename,
+        contextDocChars: meta.chars,
+        contextDocUploadedAt: meta.uploadedAt,
+      });
+      return { ok: true, ...meta };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+  ipcMain.handle('context:remove', () => {
+    contextLib.remove(app);
+    cfg = config.save(app, { contextDocName: '', contextDocChars: 0, contextDocUploadedAt: 0 });
+    return { ok: true };
+  });
   ipcMain.handle('shortcuts:set', (_e, patch) => setShortcuts(patch));
   ipcMain.handle('stt:get', () => ({ session: activeSession, entries: transcript, recording }));
 
@@ -751,6 +830,9 @@ function registerIpc() {
 
   ipcMain.handle('perm:status', () => permissionStatus());
   ipcMain.handle('perm:request', () => requestPermissions());
+  ipcMain.handle('perm:reset', () => resetPermissions());
+  ipcMain.handle('perm:open-settings', (_e, pane) => shell.openExternal(`x-apple.systempreferences:com.apple.preference.security?${PRIVACY_PANES[pane] || PRIVACY_PANES.screen}`));
+  ipcMain.handle('app:relaunch', () => { app.relaunch(); app.quit(); }); // quit, not exit: will-quit must stop the audio tap
 }
 
 // =====================================================================
@@ -759,7 +841,7 @@ function registerIpc() {
 // Control+Option (⌃⌥) combos are almost never bound by macOS apps, so Pill does not
 // steal Save As / Send / Log Out from whatever you are working in. Edit freely.
 const SHORTCUT_ACTIONS = {
-  toggle: { label: 'Show / hide Pill', fn: () => toggleVisible() },
+  toggle: { label: 'Show / hide Nola', fn: () => toggleVisible() },
   expand: { label: 'Expand / collapse', fn: () => { if (!win) return; if (!win.isVisible()) win.showInactive(); setMode(mode === 'pill' ? 'panel' : 'pill'); } },
   ask: { label: 'Ask about my screen', fn: () => { if (!win) return; if (!win.isVisible()) win.showInactive(); if (mode !== 'panel') setMode('panel'); win.focus(); send('ui:command', { cmd: 'focus-input', withScreenshot: true }); } },
   solve: { label: 'Solve what is on screen', fn: () => { if (!win) return; if (!win.isVisible()) win.showInactive(); if (mode !== 'panel') setMode('panel'); ask({ action: 'solve' }); } },
@@ -769,7 +851,7 @@ const SHORTCUT_ACTIONS = {
   down: { label: 'Move down', fn: () => nudge(0, 40) },
   left: { label: 'Move left', fn: () => nudge(-40, 0) },
   right: { label: 'Move right', fn: () => nudge(40, 0) },
-  quit: { label: 'Quit Pill', fn: () => app.quit() },
+  quit: { label: 'Quit Nola', fn: () => app.quit() },
 };
 
 function registerShortcuts() {
@@ -811,11 +893,10 @@ function setShortcuts(patch) {
   return shortcutState;
 }
 
-// Dock-less apps get no menu, and without an Edit menu Cmd+C / Cmd+V do nothing in
-// text fields on macOS. A minimal menu fixes that; it is never shown.
+// Without an Edit menu Cmd+C / Cmd+V do nothing in text fields on macOS.
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: 'Pill', submenu: [{ role: 'quit' }] },
+    { label: APP_NAME, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'quit' }] },
     { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
   ]));
 }
@@ -824,7 +905,17 @@ function installMenu() {
 // Lifecycle
 // =====================================================================
 app.whenReady().then(() => {
-  if (isMac && app.dock) app.dock.hide();
+  if (isMac && app.dock) {
+    // Packaged builds take the icon from the bundle; `npm start` runs inside the stock
+    // Electron.app, so set it explicitly or the dock shows the Electron logo.
+    app.dock.setIcon(nativeImage.createFromPath(ICON_PATH));
+    app.dock.show(); // regular app: dock icon + Cmd+Tab, whatever context launched us
+    app.dock.setMenu(Menu.buildFromTemplate([
+      { label: 'Open', click: () => showPanel() },
+      { label: 'Start / stop recording', click: () => send('ui:command', { cmd: 'toggle-record' }) },
+      { label: 'Hide', click: () => { if (win) win.hide(); } },
+    ]));
+  }
   installMenu();
 
   // Let the renderer use mic + screen without a Chromium permission prompt.
@@ -846,3 +937,4 @@ app.on('will-quit', () => {
   closeWavWriters(); // patch WAV headers so a mid-meeting quit still leaves readable audio
 });
 app.on('window-all-closed', () => app.quit());
+app.on('activate', () => showPanel());

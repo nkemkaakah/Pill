@@ -135,7 +135,11 @@ b { font-weight: 600; color: var(--ink); }
 .recording .rec { background: var(--rec-dim); border-color: rgba(242, 113, 106, 0.45); color: var(--rec); }
 .recording .rec .dot { animation: blink 1.4s ease-in-out infinite; }
 .recording .rec:hover { background: rgba(242, 113, 106, 0.28); }
-.recording .rec:hover .rec-label::after { content: ""; }
+/* Hovering a live recording says what a click will do: the timer becomes "Stop"
+   and the blinking dot becomes a stop square. */
+.recording .rec:hover .rec-label { display: none; }
+.recording .rec:hover::after { content: "Stop"; display: inline-block; min-width: 3.1em; text-align: left; }
+.recording .rec:hover .dot { border-radius: 2px; animation: none; opacity: 1; }
 @keyframes blink { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
 /* ---------- panel ---------- */
@@ -247,8 +251,12 @@ b { font-weight: 600; color: var(--ink); }
 .error { color: var(--bad); font-size: 12.5px; white-space: pre-wrap; }
 
 /* ---------- quick actions ---------- */
-.quick { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px 8px; }
+/* One row at every panel size: short labels fit at M and L, and at S the row scrolls
+   sideways instead of wrapping onto a second line. */
+.quick { display: flex; flex-wrap: nowrap; gap: 6px; padding: 6px 14px 8px; overflow-x: auto; scrollbar-width: none; }
+.quick::-webkit-scrollbar { display: none; }
 .quick button {
+  flex: 0 0 auto; white-space: nowrap;
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--ink-2);
   padding: 4px 10px 4px 8px; border-radius: 14px;
@@ -444,6 +452,7 @@ b { font-weight: 600; color: var(--ink); }
 }
 .settings select { appearance: none; }
 .settings small { color: var(--mute); font-size: 11px; }
+.settings a.ext { color: var(--accent); }
 .settings .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .provider-block { display: none; padding: 8px 10px 2px; margin: 0 0 10px; border: 1px solid var(--line); border-radius: 10px; }
 .provider-block.on { display: block; }
@@ -452,7 +461,14 @@ b { font-weight: 600; color: var(--ink); }
 .primary { background: var(--accent); color: var(--accent-ink); padding: 6px 14px; border-radius: 8px; font-weight: 600; font-size: 12.5px; white-space: nowrap; }
 .primary:hover { filter: brightness(1.08); }
 .primary:disabled { opacity: 0.5; }
-.perm-state { font-size: 11.5px; color: var(--mute); }
+.perm-list { list-style: none; margin: 0 0 6px; padding: 0; }
+.perm-list li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.perm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); flex: 0 0 auto; }
+.perm-list li.ok .perm-dot { background: var(--accent); }
+.perm-list li.bad .perm-dot { background: var(--bad); }
+.perm-name { color: var(--ink); }
+.perm-val { flex: 1 1 auto; color: var(--mute); }
+.perm-list li.bad .perm-val { color: var(--bad); }
 .shortcuts { margin-top: 14px; font-size: 12px; color: var(--ink-2); }
 .shortcuts summary { cursor: pointer; color: var(--mute); }
 .shortcuts ul { list-style: none; padding: 0; margin: 8px 0 0; }

@@ -78,9 +78,17 @@ contextBridge.exposeInMainWorld('pill', {
   sidecarStatus: () => ipcRenderer.invoke('sidecar:status'),
   setShortcuts: (patch) => ipcRenderer.invoke('shortcuts:set', patch),
 
+  // context document
+  contextStatus: () => ipcRenderer.invoke('context:status'),
+  uploadContext: () => ipcRenderer.invoke('context:upload'),
+  removeContext: () => ipcRenderer.invoke('context:remove'),
+
   // permissions
   permissionStatus: () => ipcRenderer.invoke('perm:status'),
   requestPermissions: () => ipcRenderer.invoke('perm:request'),
+  resetPermissions: () => ipcRenderer.invoke('perm:reset'),
+  openPermissionSettings: (pane) => ipcRenderer.invoke('perm:open-settings', pane),
+  relaunch: () => ipcRenderer.invoke('app:relaunch'),
 
   // events from main
   onMode: (fn) => on('ui:mode', fn),

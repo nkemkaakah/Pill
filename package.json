@@ -1,6 +1,6 @@
 {
   "name": "pill",
-  "productName": "Pill",
+  "productName": "Nkemka's Notetaker",
   "version": "0.1.0",
   "description": "A tiny always-on-top AI pill that sees your screen, hears your calls, and stays out of screen shares.",
   "main": "main.js",
@@ -10,14 +10,16 @@
     "start": "electron .",
     "pack": "electron-builder --mac --arm64 --dir",
     "dist": "electron-builder --mac --arm64",
+    "install-app": "bash scripts/install-app.sh",
     "smoke": "electron scripts/smoke.js",
-    "test": "node scripts/test-lib.js && node scripts/test-pipeline.js && node scripts/test-audio.js"
+    "test": "node scripts/test-lib.js && node scripts/test-providers.js && node scripts/test-pipeline.js && node scripts/test-audio.js"
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.11.1",
     "audiotee": "^0.0.7",
     "dompurify": "^3.2.6",
-    "marked": "^15.0.12"
+    "marked": "^15.0.12",
+    "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
     "electron": "^38.0.0",
@@ -25,7 +27,7 @@
   },
   "build": {
     "appId": "dev.nkemka.pill",
-    "productName": "Pill",
+    "productName": "Nkemka's Notetaker",
     "files": [
       "main.js",
       "preload.js",
@@ -34,7 +36,11 @@
       "node_modules/marked/**",
       "node_modules/dompurify/**",
       "node_modules/@highlightjs/cdn-assets/highlight.min.js",
-      "node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css"
+      "node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css",
+      "node_modules/pdf-parse/**",
+      "node_modules/pdfjs-dist/**",
+      "node_modules/@napi-rs/**",
+      "build/icon.png"
     ],
     "mac": {
       "category": "public.app-category.productivity",
@@ -42,14 +48,13 @@
         "dmg",
         "zip"
       ],
-      "icon": "build/icon.png",
+      "icon": "build/icon.icns",
       "hardenedRuntime": false,
       "identity": null,
       "extendInfo": {
-        "LSUIElement": true,
-        "NSMicrophoneUsageDescription": "Pill listens to your mic so it can transcribe what you say.",
-        "NSScreenCaptureUsageDescription": "Pill takes screenshots and captures system audio so it can see and hear what you are working on.",
-        "NSAudioCaptureUsageDescription": "Pill captures system audio so it can transcribe the other side of your calls."
+        "NSMicrophoneUsageDescription": "Nkemka's Notetaker listens to your mic so it can transcribe what you say.",
+        "NSScreenCaptureUsageDescription": "Nkemka's Notetaker takes screenshots and captures system audio so it can see and hear what you are working on.",
+        "NSAudioCaptureUsageDescription": "Nkemka's Notetaker captures system audio so it can transcribe the other side of your calls."
       }
     },
     "extraResources": [
